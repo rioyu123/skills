@@ -1,5 +1,7 @@
 """Real CLI regressions for skill archive contents (requires PyYAML)."""
 
+from contextlib import redirect_stdout
+import io
 import os
 from pathlib import Path
 import random
@@ -8,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 
@@ -118,6 +121,34 @@ class PackageSkillTests(unittest.TestCase):
         for name, data in assets.items():
             (self.skill / name).write_bytes(data)
         self.assert_packaged(output, assets=assets)
+
+    def test_hard_link_to_output_archive_is_not_packaged(self):
+        output = self.root / "external"
+        output.mkdir()
+        archive_path = output / "sample-skill.skill"
+        archive_path.write_bytes(b"old output")
+        alias = self.skill / "linked-output.skill"
+        os.link(archive_path, alias)
+
+        # Do not allow a failing implementation to read the archive while it
+        # writes through another name for the same file.
+        original_write = zipfile.ZipFile.write
+
+        def guarded_write(zipf, filename, *args, **kwargs):
+            if Path(filename).samefile(archive_path):
+                raise AssertionError("attempted to package the output archive")
+            return original_write(zipf, filename, *args, **kwargs)
+
+        with mock.patch.object(zipfile.ZipFile, "write", guarded_write):
+            with mock.patch.object(sys, "path", [str(SKILL_CREATOR), *sys.path]):
+                from scripts.package_skill import package_skill
+
+                output_text = io.StringIO()
+                with redirect_stdout(output_text):
+                    result = package_skill(self.skill, output)
+
+        self.assertEqual(result, archive_path, output_text.getvalue())
+        self.assert_archive(output)
 
     @unittest.skipUnless(os.name == "posix", "requires an output-size resource limit")
     def test_binary_asset_does_not_feed_output_back_into_input(self):
